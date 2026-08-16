@@ -7,6 +7,7 @@ from backend.app.core.logger import logging
 from backend.app.core.exceptions import CustomException
 from sklearn.metrics.pairwise import haversine_distances
 
+
 class STDBSCAN:
     """
     Fits ST-DBSCAN and predicts cluster labels for a spatio-temporal dataset.
@@ -84,49 +85,41 @@ class STDBSCAN:
                 if visited[i]:
                     continue
 
+                visited[i] = True
                 neighbors = np.where(st_neighbors[i])[0]
 
                 # Check if core point
                 if len(neighbors) < self.min_samples:
-                    labels[i] = -1  # Mark as noise
-                    visited[i] = True
-                else:
-                    # Start a new cluster using BFS
-                    labels[i] = cluster_id
-                    visited[i] = True
-                    
-                    # Initialize BFS Queue with core point neighbors
-                    queue = deque()
-                    in_queue = set()
+                    # Mark as noise (already -1)
+                    continue
 
-                    for nbr in neighbors:
-                        if nbr != i:
-                            if labels[nbr] == -1:
-                                labels[nbr] = cluster_id
-                            if not visited[nbr]:
-                                visited[nbr] = True
-                                queue.append(nbr)
-                                in_queue.add(nbr)
+                # Start a new cluster using BFS
+                labels[i] = cluster_id
+                
+                # Initialize BFS Queue with core point neighbors
+                queue = deque([n for n in neighbors if n != i])
+                in_queue = set(queue)
 
-                    while queue:
-                        curr = queue.popleft()
+                while queue:
+                    curr = queue.popleft()
+                    in_queue.remove(curr)
 
-                        # Expand cluster if 'curr' is also a core point
-                        if not visited[curr]:
-                            visited[curr] = True
-                            curr_neighbors = np.where(st_neighbors[curr])[0]
+                    # Expand cluster if 'curr' is also a core point
+                    if not visited[curr]:
+                        visited[curr] = True
+                        curr_neighbors = np.where(st_neighbors[curr])[0]
 
-                            if len(curr_neighbors) >= self.min_samples:
-                                for nbr in curr_neighbors:
-                                    if nbr not in in_queue and not visited[nbr]:
-                                        queue.append(nbr)
-                                        in_queue.add(nbr)
+                        if len(curr_neighbors) >= self.min_samples:
+                            for nbr in curr_neighbors:
+                                if not visited[nbr] and nbr not in in_queue:
+                                    queue.append(nbr)
+                                    in_queue.add(nbr)
 
-                        # Assign cluster ID if point is unassigned or previously marked noise
-                        if labels[curr] == -1:
-                            labels[curr] = cluster_id
+                    # Assign cluster ID if point is unassigned or previously marked noise
+                    if labels[curr] == -1:
+                        labels[curr] = cluster_id
 
-                    cluster_id += 1
+                cluster_id += 1
 
             self.labels_ = labels
             n_clusters = len(set(labels)) - (1 if -1 in labels else 0)
@@ -138,3 +131,45 @@ class STDBSCAN:
         except Exception as e:
             logging.error("Unhandled error in BFS ST-DBSCAN.")
             raise CustomException(e, sys)
+
+    def generate_cluster_summary(
+        self,
+        df: pd.DataFrame,
+        lat_col: str = 'latitude',
+        lon_col: str = 'longitude',
+        time_col: str = 'timestamp'
+    ) -> pd.DataFrame:
+        """
+        Generates a summary DataFrame for the clustered points.
+        Returns a DataFrame with cluster statistics, excluding noise points (-1).
+        """
+        if self.labels_ is None:
+            raise ValueError("Model must be fitted before generating a cluster summary.")
+        
+        if len(df) != len(self.labels_):
+            raise ValueError("DataFrame length must match the number of labels.")
+            
+        df_clustered = df.copy()
+        df_clustered['cluster_id'] = self.labels_
+        
+        # Filter out noise
+        df_clusters = df_clustered[df_clustered['cluster_id'] >= 0]
+        
+        if df_clusters.empty:
+            return pd.DataFrame()
+            
+        # Group by cluster ID
+        grouped = df_clusters.groupby('cluster_id')
+        
+        summary_df = grouped.agg(
+            count=(lat_col, 'size'),
+            mean_latitude=(lat_col, 'mean'),
+            mean_longitude=(lon_col, 'mean'),
+            start_time=(time_col, 'min'),
+            end_time=(time_col, 'max')
+        ).reset_index()
+        
+        # Calculate duration
+        summary_df['duration_days'] = (pd.to_datetime(summary_df['end_time']) - pd.to_datetime(summary_df['start_time'])).dt.total_seconds() / 86400.0
+        
+        return summary_df
